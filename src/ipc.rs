@@ -239,6 +239,27 @@ impl EventStream {
         }
     }
 
+    /// Block until an [`Event::WindowLayoutsChanged`] event arrives that
+    /// includes the given window id, then return.
+    ///
+    /// This is used after a `SetColumnWidth` action to wait for the
+    /// column-width change to propagate through the compositor's layout
+    /// engine and the Wayland configure/commit round-trip before attempting
+    /// to center visible columns.  Without this wait, `CenterVisibleColumns`
+    /// can run before the window has committed its new buffer, and a
+    /// subsequent viewport adjustment by Niri (to keep columns in view after
+    /// the commit) will undo the centering.
+    pub fn wait_for_window_layout_change(&mut self, window_id: u64) -> Result<()> {
+        loop {
+            let event = self.read_next_event()?;
+            if let Event::WindowLayoutsChanged { changes } = &event {
+                if changes.iter().any(|(id, _)| *id == window_id) {
+                    return Ok(());
+                }
+            }
+        }
+    }
+
     /// Block until a window that is not in `known_ids` appears on the
     /// workspace identified by `workspace_id`, then return the new window's
     /// id.

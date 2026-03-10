@@ -75,6 +75,8 @@ fn run(cli: Cli) -> Result<()> {
             .with_context(|| format!("waiting for workspace {ws_index} to be focused"))?;
 
         for column in &workspace.columns {
+            let mut last_spawned_window_id: Option<u64> = None;
+
             for (app_index, entry) in column.apps.iter().enumerate() {
                 let command = config.resolve_app(&entry.app);
 
@@ -92,6 +94,7 @@ fn run(cli: Cli) -> Result<()> {
                         format!("waiting for window of '{command}' to appear")
                     })?;
                 known_ids.insert(new_id);
+                last_spawned_window_id = Some(new_id);
 
                 // For non-first apps in a column, pull the window into the
                 // column to its left.
@@ -108,6 +111,16 @@ fn run(cli: Cli) -> Result<()> {
             if let Some(width) = column.width {
                 ipc::set_column_width(niri_ipc::SizeChange::SetProportion(width * 100.0))
                     .context("setting column width")?;
+                // Wait for the layout change to propagate through the
+                // compositor and the Wayland configure/commit round-trip.
+                // Without this, CenterVisibleColumns can run before the
+                // window has committed its new buffer, and a later viewport
+                // adjustment by Niri can undo the centering.
+                if let Some(window_id) = last_spawned_window_id {
+                    event_stream
+                        .wait_for_window_layout_change(window_id)
+                        .context("waiting for column layout to update after width change")?;
+                }
             }
         }
 
