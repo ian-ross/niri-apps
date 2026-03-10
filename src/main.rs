@@ -112,6 +112,7 @@ fn run(cli: Cli) -> Result<()> {
         }
 
         if workspace.center {
+            ipc::focus_column_first().context("focusing first column before centering")?;
             ipc::center_visible_columns().context("centering visible columns")?;
         }
     }

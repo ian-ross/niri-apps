@@ -43,6 +43,16 @@ pub fn focus_workspace(index: u8) -> Result<()> {
     }
 }
 
+/// Focus the first column on the focused workspace.
+pub fn focus_column_first() -> Result<()> {
+    let request = Request::Action(Action::FocusColumnFirst {});
+    let response = send_request(&request)?;
+    match response {
+        Response::Handled => Ok(()),
+        other => bail!("unexpected response to FocusColumnFirst: {other:?}"),
+    }
+}
+
 /// Center all visible columns on the focused workspace.
 pub fn center_visible_columns() -> Result<()> {
     let request = Request::Action(Action::CenterVisibleColumns {});
