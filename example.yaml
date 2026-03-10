@@ -1,0 +1,40 @@
+# niri-apps example configuration
+#
+# Place this file at ~/.config/niri-apps/config.yaml
+# or pass it with: niri-apps --config /path/to/config.yaml
+
+# Short aliases for frequently used applications.
+# When an `app` entry matches an alias name, the full aliased command is used.
+aliases:
+  emacs: "emacsclient -c"
+  terminal: "foot"
+  browser: "firefox"
+  files: "nautilus"
+
+# One entry per Niri workspace (1-based index order).
+workspaces:
+  - name: "editor"
+    # Center all visible columns after opening applications.
+    center: true
+    columns:
+      # Single application in a column at default width.
+      - apps:
+          - app: emacs
+
+  - name: "web"
+    columns:
+      # Browser in a wide column.
+      - width: 1.5
+        apps:
+          - app: browser
+      # Terminal alongside it at half width.
+      - width: 0.5
+        apps:
+          - app: terminal
+
+  - name: "files"
+    columns:
+      # Two apps stacked vertically in the same column.
+      - apps:
+          - app: files
+          - app: terminal
