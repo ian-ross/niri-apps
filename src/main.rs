@@ -1,6 +1,7 @@
 mod config;
 mod ipc;
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -44,9 +45,36 @@ fn run(cli: Cli) -> Result<()> {
         ipc::focus_workspace(ws_index).with_context(|| format!("focusing workspace {ws_index}"))?;
 
         for column in &workspace.columns {
-            for entry in &column.apps {
+            for (app_index, entry) in column.apps.iter().enumerate() {
                 let command = config.resolve_app(&entry.app);
-                spawn_app(command).with_context(|| format!("spawning application '{command}'"))?;
+
+                // For non-first apps in a column, snapshot the current window
+                // list so we can detect when the new window appears.
+                let known_ids: Option<HashSet<u64>> = if app_index > 0 {
+                    Some(
+                        ipc::list_windows()
+                            .context("listing windows before spawn")?
+                            .into_iter()
+                            .map(|w| w.id)
+                            .collect(),
+                    )
+                } else {
+                    None
+                };
+
+                spawn_app(command)
+                    .with_context(|| format!("spawning application '{command}'"))?;
+
+                // If this is not the first app in the column, wait for its
+                // window to appear and then pull it into this column.
+                if let Some(known_ids) = known_ids {
+                    ipc::wait_for_new_window(&known_ids)
+                        .with_context(|| {
+                            format!("waiting for window of '{command}' to appear")
+                        })?;
+                    ipc::consume_or_expel_window_left()
+                        .context("consuming window into column")?;
+                }
             }
         }
 
