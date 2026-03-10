@@ -1,7 +1,10 @@
 use anyhow::{Context, Result, bail};
-use niri_ipc::{Action, Request, Response};
+use niri_ipc::{Action, Reply, Request, Response, Window};
+use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
+use std::thread::sleep;
+use std::time::{Duration, Instant};
 
 fn socket_path() -> Result<String> {
     std::env::var("NIRI_SOCKET")
@@ -25,8 +28,8 @@ fn send_request(request: &Request) -> Result<Response> {
         .read_line(&mut line)
         .context("reading response from socket")?;
 
-    let response: Response = serde_json::from_str(&line).context("deserialising response")?;
-    Ok(response)
+    let reply: Reply = serde_json::from_str(&line).context("deserialising response")?;
+    reply.map_err(|e| anyhow::anyhow!("niri error: {e}"))
 }
 
 /// Focus the workspace with the given index (1-based).
@@ -48,5 +51,45 @@ pub fn center_visible_columns() -> Result<()> {
     match response {
         Response::Handled => Ok(()),
         other => bail!("unexpected response to CenterVisibleColumns: {other:?}"),
+    }
+}
+
+/// Return the list of all open windows.
+pub fn list_windows() -> Result<Vec<Window>> {
+    let response = send_request(&Request::Windows)?;
+    match response {
+        Response::Windows(windows) => Ok(windows),
+        other => bail!("unexpected response to Windows: {other:?}"),
+    }
+}
+
+/// Poll the window list until a window whose ID is not in `known_ids` appears,
+/// then return that window's ID. Times out after 30 seconds.
+pub fn wait_for_new_window(known_ids: &HashSet<u64>) -> Result<u64> {
+    let timeout = Duration::from_secs(30);
+    let poll_interval = Duration::from_millis(200);
+    let start = Instant::now();
+
+    loop {
+        if start.elapsed() > timeout {
+            bail!("timed out waiting for new window to appear");
+        }
+        for window in list_windows()? {
+            if !known_ids.contains(&window.id) {
+                return Ok(window.id);
+            }
+        }
+        sleep(poll_interval);
+    }
+}
+
+/// Consume or expel the focused window to the left (merges it into the
+/// column to its left).
+pub fn consume_or_expel_window_left() -> Result<()> {
+    let request = Request::Action(Action::ConsumeOrExpelWindowLeft { id: None });
+    let response = send_request(&request)?;
+    match response {
+        Response::Handled => Ok(()),
+        other => bail!("unexpected response to ConsumeOrExpelWindowLeft: {other:?}"),
     }
 }
