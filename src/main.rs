@@ -1,7 +1,6 @@
 mod config;
 mod ipc;
 
-use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -38,10 +37,15 @@ fn run(cli: Cli) -> Result<()> {
     let config = config::Config::load(&config_path)
         .with_context(|| format!("loading config from {}", config_path.display()))?;
 
+    // Connect to the niri event stream.  The initial snapshot gives us the
+    // current workspace list (to compute the starting index) and the set of
+    // already-open window ids (so we can detect each newly spawned window).
+    let (mut event_stream, workspaces, mut known_ids) =
+        ipc::EventStream::connect().context("connecting to niri event stream")?;
+
     // Find the empty workspace at the bottom of the current output's stack
     // and use it as our starting point, so that we don't disturb existing
     // windows.
-    let workspaces = ipc::list_workspaces().context("listing workspaces")?;
     let focused_output = workspaces
         .iter()
         .find(|ws| ws.is_focused)
@@ -60,50 +64,49 @@ fn run(cli: Cli) -> Result<()> {
     for (workspace_index, workspace) in config.workspaces.iter().enumerate() {
         let ws_index = start_index + workspace_index as u8;
 
+        // Ask niri to focus the workspace (creating it if it doesn't exist yet).
         ipc::focus_workspace(ws_index).with_context(|| format!("focusing workspace {ws_index}"))?;
+
+        // Wait for the compositor to confirm the focus via the event stream.
+        // This also resolves ws_index to its stable id, which is needed to
+        // correctly identify windows that open on this workspace.
+        let ws_id = event_stream
+            .wait_for_workspace_focus(ws_index)
+            .with_context(|| format!("waiting for workspace {ws_index} to be focused"))?;
 
         for column in &workspace.columns {
             for (app_index, entry) in column.apps.iter().enumerate() {
                 let command = config.resolve_app(&entry.app);
 
-                // Snapshot the current window list if:
-                // - this is not the first app in the column (to detect the new
-                //   window so it can be merged into the column), or
-                // - this is the first app and a column width is set (so we can
-                //   wait for its window to appear before setting the width).
-                let should_wait_for_window = app_index > 0 || column.width.is_some();
-                let known_ids: Option<HashSet<u64>> = if should_wait_for_window {
-                    Some(
-                        ipc::list_windows()
-                            .context("listing windows before spawn")?
-                            .into_iter()
-                            .map(|w| w.id)
-                            .collect(),
-                    )
-                } else {
-                    None
-                };
-
                 spawn_app(command)
                     .with_context(|| format!("spawning application '{command}'"))?;
 
-                // Wait for the new window to appear; for non-first apps in the
-                // column, also pull the window into this column.
-                if let Some(known_ids) = known_ids {
-                    ipc::wait_for_new_window(&known_ids)
-                        .with_context(|| {
-                            format!("waiting for window of '{command}' to appear")
-                        })?;
-                    if app_index > 0 {
-                        ipc::consume_or_expel_window_left()
-                            .context("consuming window into column")?;
-                    }
+                // Wait for the new window to appear on this workspace.  We
+                // always wait (not just for non-first apps or width-bearing
+                // columns) so that the compositor has fully settled before we
+                // move on — this prevents windows from opening on the wrong
+                // workspace when multiple workspaces are being set up.
+                let new_id = event_stream
+                    .wait_for_new_window(&known_ids, ws_id)
+                    .with_context(|| {
+                        format!("waiting for window of '{command}' to appear")
+                    })?;
+                known_ids.insert(new_id);
+
+                // For non-first apps in a column, pull the window into the
+                // column to its left.
+                if app_index > 0 {
+                    ipc::consume_or_expel_window_left()
+                        .context("consuming window into column")?;
                 }
             }
 
-            // Apply the column width if one is specified.
+            // Apply the column width if one is specified.  The config uses
+            // fractions of the display width (e.g. 0.5 = half-width), while
+            // the Niri IPC SetProportion action expects a percentage value
+            // (e.g. 50.0), so we multiply by 100.
             if let Some(width) = column.width {
-                ipc::set_column_width(niri_ipc::SizeChange::SetProportion(width))
+                ipc::set_column_width(niri_ipc::SizeChange::SetProportion(width * 100.0))
                     .context("setting column width")?;
             }
         }

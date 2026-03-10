@@ -1,10 +1,9 @@
 use anyhow::{Context, Result, bail};
-use niri_ipc::{Action, Reply, Request, Response, SizeChange, Window, Workspace};
-use std::collections::HashSet;
-use std::io::{BufRead, BufReader, Write};
+use niri_ipc::{Action, Event, Reply, Request, Response, SizeChange, Workspace};
+use std::collections::{HashMap, HashSet};
+use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
-use std::thread::sleep;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 fn socket_path() -> Result<String> {
     std::env::var("NIRI_SOCKET")
@@ -54,35 +53,6 @@ pub fn center_visible_columns() -> Result<()> {
     }
 }
 
-/// Return the list of all open windows.
-pub fn list_windows() -> Result<Vec<Window>> {
-    let response = send_request(&Request::Windows)?;
-    match response {
-        Response::Windows(windows) => Ok(windows),
-        other => bail!("unexpected response to Windows: {other:?}"),
-    }
-}
-
-/// Poll the window list until a window whose ID is not in `known_ids` appears,
-/// then return that window's ID. Times out after 30 seconds.
-pub fn wait_for_new_window(known_ids: &HashSet<u64>) -> Result<u64> {
-    let timeout = Duration::from_secs(30);
-    let poll_interval = Duration::from_millis(200);
-    let start = Instant::now();
-
-    loop {
-        if start.elapsed() > timeout {
-            bail!("timed out waiting for new window to appear");
-        }
-        for window in list_windows()? {
-            if !known_ids.contains(&window.id) {
-                return Ok(window.id);
-            }
-        }
-        sleep(poll_interval);
-    }
-}
-
 /// Consume or expel the focused window to the left (merges it into the
 /// column to its left).
 pub fn consume_or_expel_window_left() -> Result<()> {
@@ -94,15 +64,6 @@ pub fn consume_or_expel_window_left() -> Result<()> {
     }
 }
 
-/// Return the list of all workspaces.
-pub fn list_workspaces() -> Result<Vec<Workspace>> {
-    let response = send_request(&Request::Workspaces)?;
-    match response {
-        Response::Workspaces(workspaces) => Ok(workspaces),
-        other => bail!("unexpected response to Workspaces: {other:?}"),
-    }
-}
-
 /// Set the width of the focused column as a proportion of the working area.
 pub fn set_column_width(change: SizeChange) -> Result<()> {
     let request = Request::Action(Action::SetColumnWidth { change });
@@ -110,5 +71,180 @@ pub fn set_column_width(change: SizeChange) -> Result<()> {
     match response {
         Response::Handled => Ok(()),
         other => bail!("unexpected response to SetColumnWidth: {other:?}"),
+    }
+}
+
+/// A persistent connection to the niri IPC event stream.
+///
+/// On connection niri sends an initial state snapshot via `WorkspacesChanged`
+/// and `WindowsChanged` events before any incremental events.  All subsequent
+/// state changes arrive as individual events in compositor order.
+///
+/// Because requesting `EventStream` stops niri from reading further requests
+/// on the *same* socket, all IPC actions (focus, set width, …) must be sent on
+/// separate connections — that is already the case for `send_request`, which
+/// opens a fresh socket per call.
+pub struct EventStream {
+    reader: BufReader<UnixStream>,
+    /// Id of the currently-focused workspace (updated from `WorkspaceActivated`).
+    focused_workspace_id: Option<u64>,
+    /// Map from workspace index to stable workspace id (updated from
+    /// `WorkspacesChanged`).  Niri creates new workspaces on demand when a
+    /// `FocusWorkspace` action targets a previously non-existent index, so
+    /// this map must be kept current from events rather than read once at
+    /// startup.
+    workspace_ids: HashMap<u8, u64>,
+}
+
+impl EventStream {
+    /// Connect to niri, request the event stream, and consume the initial
+    /// state snapshot.  Returns the stream together with:
+    /// - the initial workspace list (used to compute the starting workspace
+    ///   index), and
+    /// - the set of window ids that are already open (used to detect newly
+    ///   spawned windows).
+    pub fn connect() -> Result<(Self, Vec<Workspace>, HashSet<u64>)> {
+        let path = socket_path()?;
+        let stream = UnixStream::connect(&path)
+            .with_context(|| format!("connecting to niri event stream socket {path}"))?;
+        // All blocking reads on this socket are bounded by this timeout.
+        stream
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .context("setting read timeout on event stream socket")?;
+        let mut reader = BufReader::new(stream);
+
+        // Request the event stream.
+        let msg = serde_json::to_string(&Request::EventStream)
+            .context("serialising EventStream request")?;
+        reader
+            .get_mut()
+            .write_all(msg.as_bytes())
+            .context("writing EventStream request")?;
+        reader
+            .get_mut()
+            .write_all(b"\n")
+            .context("writing newline")?;
+
+        // Niri replies with Reply::Ok(Response::Handled) before sending events.
+        let mut line = String::new();
+        reader
+            .read_line(&mut line)
+            .context("reading EventStream response")?;
+        let reply: Reply =
+            serde_json::from_str(&line).context("deserialising EventStream response")?;
+        reply.map_err(|e| anyhow::anyhow!("niri error starting event stream: {e}"))?;
+
+        // Consume the initial snapshot.  Niri always sends `WorkspacesChanged`
+        // and `WindowsChanged` (among other state events) before any
+        // incremental events.
+        let mut initial_workspaces: Option<Vec<Workspace>> = None;
+        let mut initial_window_ids: Option<HashSet<u64>> = None;
+        let mut focused_workspace_id: Option<u64> = None;
+        let mut workspace_ids: HashMap<u8, u64> = HashMap::new();
+
+        while initial_workspaces.is_none() || initial_window_ids.is_none() {
+            line.clear();
+            reader.read_line(&mut line).context("reading initial event")?;
+            if line.trim().is_empty() {
+                bail!("niri IPC event stream closed during initial state");
+            }
+            let event: Event =
+                serde_json::from_str(&line).context("deserialising initial event")?;
+            match event {
+                Event::WorkspacesChanged { workspaces } => {
+                    focused_workspace_id =
+                        workspaces.iter().find(|ws| ws.is_focused).map(|ws| ws.id);
+                    workspace_ids =
+                        workspaces.iter().map(|ws| (ws.idx, ws.id)).collect();
+                    initial_workspaces = Some(workspaces);
+                }
+                Event::WindowsChanged { windows } => {
+                    initial_window_ids =
+                        Some(windows.into_iter().map(|w| w.id).collect());
+                }
+                _ => {}
+            }
+        }
+
+        Ok((
+            Self {
+                reader,
+                focused_workspace_id,
+                workspace_ids,
+            },
+            initial_workspaces.unwrap(),
+            initial_window_ids.unwrap(),
+        ))
+    }
+
+    /// Read one event from the stream, updating internal state as a side
+    /// effect.  Returns an error if the stream closes or times out.
+    fn read_next_event(&mut self) -> Result<Event> {
+        let mut line = String::new();
+        match self.reader.read_line(&mut line) {
+            Ok(0) => bail!("niri IPC event stream closed unexpectedly"),
+            Ok(_) => {}
+            Err(e)
+                if e.kind() == io::ErrorKind::WouldBlock
+                    || e.kind() == io::ErrorKind::TimedOut =>
+            {
+                bail!("timed out waiting for niri IPC event");
+            }
+            Err(e) => return Err(anyhow::anyhow!(e)).context("reading event from stream"),
+        }
+        let event: Event = serde_json::from_str(&line).context("deserialising event")?;
+
+        // Keep workspace state current so lookups in the wait helpers are
+        // always up to date.
+        match &event {
+            Event::WorkspaceActivated { id, focused: true } => {
+                self.focused_workspace_id = Some(*id);
+            }
+            Event::WorkspacesChanged { workspaces } => {
+                self.workspace_ids =
+                    workspaces.iter().map(|ws| (ws.idx, ws.id)).collect();
+            }
+            _ => {}
+        }
+        Ok(event)
+    }
+
+    /// Block until the workspace at `ws_index` is confirmed as focused by a
+    /// `WorkspaceActivated` event, then return its stable id.
+    ///
+    /// Returns immediately if the workspace is already focused according to
+    /// the tracked state.  The workspace may not exist yet when this is called
+    /// (niri creates it on demand in response to `FocusWorkspace`); in that
+    /// case the preceding `WorkspacesChanged` event — which `read_next_event`
+    /// processes before returning it — will have populated `workspace_ids`
+    /// with the new entry before the `WorkspaceActivated` event is seen.
+    pub fn wait_for_workspace_focus(&mut self, ws_index: u8) -> Result<u64> {
+        loop {
+            if let Some(&ws_id) = self.workspace_ids.get(&ws_index)
+                && self.focused_workspace_id == Some(ws_id)
+            {
+                return Ok(ws_id);
+            }
+            self.read_next_event()?;
+        }
+    }
+
+    /// Block until a window that is not in `known_ids` appears on the
+    /// workspace identified by `workspace_id`, then return the new window's
+    /// id.
+    pub fn wait_for_new_window(
+        &mut self,
+        known_ids: &HashSet<u64>,
+        workspace_id: u64,
+    ) -> Result<u64> {
+        loop {
+            let event = self.read_next_event()?;
+            if let Event::WindowOpenedOrChanged { window } = event
+                && !known_ids.contains(&window.id)
+                && window.workspace_id == Some(workspace_id)
+            {
+                return Ok(window.id);
+            }
+        }
     }
 }
