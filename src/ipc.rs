@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use niri_ipc::{Action, Reply, Request, Response, Window};
+use niri_ipc::{Action, Reply, Request, Response, SizeChange, Window, Workspace};
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -91,5 +91,24 @@ pub fn consume_or_expel_window_left() -> Result<()> {
     match response {
         Response::Handled => Ok(()),
         other => bail!("unexpected response to ConsumeOrExpelWindowLeft: {other:?}"),
+    }
+}
+
+/// Return the list of all workspaces.
+pub fn list_workspaces() -> Result<Vec<Workspace>> {
+    let response = send_request(&Request::Workspaces)?;
+    match response {
+        Response::Workspaces(workspaces) => Ok(workspaces),
+        other => bail!("unexpected response to Workspaces: {other:?}"),
+    }
+}
+
+/// Set the width of the focused column as a proportion of the working area.
+pub fn set_column_width(change: SizeChange) -> Result<()> {
+    let request = Request::Action(Action::SetColumnWidth { change });
+    let response = send_request(&request)?;
+    match response {
+        Response::Handled => Ok(()),
+        other => bail!("unexpected response to SetColumnWidth: {other:?}"),
     }
 }

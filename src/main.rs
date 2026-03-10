@@ -38,9 +38,27 @@ fn run(cli: Cli) -> Result<()> {
     let config = config::Config::load(&config_path)
         .with_context(|| format!("loading config from {}", config_path.display()))?;
 
+    // Find the empty workspace at the bottom of the current output's stack
+    // and use it as our starting point, so that we don't disturb existing
+    // windows.
+    let workspaces = ipc::list_workspaces().context("listing workspaces")?;
+    let focused_output = workspaces
+        .iter()
+        .find(|ws| ws.is_focused)
+        .and_then(|ws| ws.output.as_ref());
+    let start_index = if let Some(output) = focused_output {
+        workspaces
+            .iter()
+            .filter(|ws| ws.output.as_ref() == Some(output) && ws.active_window_id.is_none())
+            .map(|ws| ws.idx)
+            .max()
+            .unwrap_or(1)
+    } else {
+        1
+    };
+
     for (workspace_index, workspace) in config.workspaces.iter().enumerate() {
-        // Workspaces in Niri are 1-based.
-        let ws_index = (workspace_index + 1) as u8;
+        let ws_index = start_index + workspace_index as u8;
 
         ipc::focus_workspace(ws_index).with_context(|| format!("focusing workspace {ws_index}"))?;
 
@@ -48,9 +66,13 @@ fn run(cli: Cli) -> Result<()> {
             for (app_index, entry) in column.apps.iter().enumerate() {
                 let command = config.resolve_app(&entry.app);
 
-                // For non-first apps in a column, snapshot the current window
-                // list so we can detect when the new window appears.
-                let known_ids: Option<HashSet<u64>> = if app_index > 0 {
+                // Snapshot the current window list if:
+                // - this is not the first app in the column (to detect the new
+                //   window so it can be merged into the column), or
+                // - this is the first app and a column width is set (so we can
+                //   wait for its window to appear before setting the width).
+                let should_wait_for_window = app_index > 0 || column.width.is_some();
+                let known_ids: Option<HashSet<u64>> = if should_wait_for_window {
                     Some(
                         ipc::list_windows()
                             .context("listing windows before spawn")?
@@ -65,16 +87,24 @@ fn run(cli: Cli) -> Result<()> {
                 spawn_app(command)
                     .with_context(|| format!("spawning application '{command}'"))?;
 
-                // If this is not the first app in the column, wait for its
-                // window to appear and then pull it into this column.
+                // Wait for the new window to appear; for non-first apps in the
+                // column, also pull the window into this column.
                 if let Some(known_ids) = known_ids {
                     ipc::wait_for_new_window(&known_ids)
                         .with_context(|| {
                             format!("waiting for window of '{command}' to appear")
                         })?;
-                    ipc::consume_or_expel_window_left()
-                        .context("consuming window into column")?;
+                    if app_index > 0 {
+                        ipc::consume_or_expel_window_left()
+                            .context("consuming window into column")?;
+                    }
                 }
+            }
+
+            // Apply the column width if one is specified.
+            if let Some(width) = column.width {
+                ipc::set_column_width(niri_ipc::SizeChange::SetProportion(width))
+                    .context("setting column width")?;
             }
         }
 

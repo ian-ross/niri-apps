@@ -36,8 +36,9 @@ pub struct Workspace {
 /// A column on a workspace: one or more applications stacked vertically.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Column {
-    /// Optional non-default column width, as a proportion of the screen width
-    /// (e.g. `1.5` for 1.5× the default column width).
+    /// Optional column width as a fraction of the total screen width
+    /// (e.g., `0.5` for half the screen width, `1.0` for the full screen
+    /// width).
     pub width: Option<f64>,
 
     /// Applications to open in this column.
