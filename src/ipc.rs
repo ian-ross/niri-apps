@@ -53,13 +53,13 @@ pub fn focus_column_first() -> Result<()> {
     }
 }
 
-/// Center the focused column on the screen.
-pub fn center_column() -> Result<()> {
-    let request = Request::Action(Action::CenterColumn {});
+/// Center all visible columns on the focused workspace.
+pub fn center_visible_columns() -> Result<()> {
+    let request = Request::Action(Action::CenterVisibleColumns {});
     let response = send_request(&request)?;
     match response {
         Response::Handled => Ok(()),
-        other => bail!("unexpected response to CenterColumn: {other:?}"),
+        other => bail!("unexpected response to CenterVisibleColumns: {other:?}"),
     }
 }
 
