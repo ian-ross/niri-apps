@@ -113,6 +113,13 @@ fn run(cli: Cli) -> Result<()> {
 
         if workspace.center {
             ipc::focus_column_first().context("focusing first column before centering")?;
+            // Call center_visible_columns twice.  Due to the timing of window
+            // resizes and the Niri viewport scroll heuristic, FocusColumnFirst
+            // can leave column 1 right-aligned with the remaining columns
+            // off-screen.  The first call centers whatever is currently
+            // visible; that repositions the viewport so the other columns come
+            // into view, and the second call centers the full group.
+            ipc::center_visible_columns().context("centering visible columns")?;
             ipc::center_visible_columns().context("centering visible columns")?;
         }
     }
