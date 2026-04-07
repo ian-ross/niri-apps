@@ -122,6 +122,22 @@ fn run(cli: Cli) -> Result<()> {
                         .context("waiting for column layout to update after width change")?;
                 }
             }
+
+            // Switch the column to tabbed display if requested.  This is done
+            // after the width settle-wait so that layout-affecting changes have
+            // already propagated before the display mode changes.  We then
+            // wait for the resulting layout event before moving on so that
+            // CenterVisibleColumns (if center: true) does not run before the
+            // compositor has committed the new buffer.
+            if column.tabbed {
+                ipc::set_column_display(niri_ipc::ColumnDisplay::Tabbed)
+                    .context("setting column display to tabbed")?;
+                if let Some(window_id) = last_spawned_window_id {
+                    event_stream
+                        .wait_for_window_layout_change(window_id)
+                        .context("waiting for column layout to update after tabbed display")?;
+                }
+            }
         }
 
         if workspace.center {

@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use niri_ipc::{Action, Event, Reply, Request, Response, SizeChange, Workspace};
+use niri_ipc::{Action, ColumnDisplay, Event, Reply, Request, Response, SizeChange, Workspace};
 use std::collections::{HashMap, HashSet};
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -71,6 +71,16 @@ pub fn consume_or_expel_window_left() -> Result<()> {
     match response {
         Response::Handled => Ok(()),
         other => bail!("unexpected response to ConsumeOrExpelWindowLeft: {other:?}"),
+    }
+}
+
+/// Set the display mode of the focused column.
+pub fn set_column_display(display: ColumnDisplay) -> Result<()> {
+    let request = Request::Action(Action::SetColumnDisplay { display });
+    let response = send_request(&request)?;
+    match response {
+        Response::Handled => Ok(()),
+        other => bail!("unexpected response to SetColumnDisplay: {other:?}"),
     }
 }
 

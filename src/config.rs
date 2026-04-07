@@ -41,6 +41,11 @@ pub struct Column {
     /// width).
     pub width: Option<f64>,
 
+    /// When true, display the column's windows as tabs rather than stacked
+    /// vertically.  The last application in the list will be the active tab.
+    #[serde(default)]
+    pub tabbed: bool,
+
     /// Applications to open in this column.
     pub apps: Vec<AppEntry>,
 }
@@ -127,5 +132,23 @@ workspaces:
         let config: Config = serde_yml::from_str("{}").unwrap();
         assert!(config.aliases.is_empty());
         assert!(config.workspaces.is_empty());
+    }
+
+    #[test]
+    fn tabbed_column() {
+        let yaml = r#"
+workspaces:
+  - columns:
+      - tabbed: true
+        apps:
+          - app: emacs
+          - app: terminal
+      - apps:
+          - app: firefox
+"#;
+        let config: Config = serde_yml::from_str(yaml).unwrap();
+        let ws = &config.workspaces[0];
+        assert!(ws.columns[0].tabbed);
+        assert!(!ws.columns[1].tabbed);
     }
 }
