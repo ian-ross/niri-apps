@@ -3,6 +3,7 @@ mod ipc;
 
 use std::path::PathBuf;
 use std::process::Command;
+use std::thread;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -33,6 +34,8 @@ fn default_config_path() -> PathBuf {
 }
 
 fn run(cli: Cli) -> Result<()> {
+    thread::sleep(std::time::Duration::from_millis(1000));
+
     let config_path = cli.config.unwrap_or_else(default_config_path);
     let config = config::Config::load(&config_path)
         .with_context(|| format!("loading config from {}", config_path.display()))?;
@@ -152,6 +155,9 @@ fn run(cli: Cli) -> Result<()> {
             ipc::center_visible_columns().context("centering visible columns")?;
         }
     }
+
+    // Ask niri to focus first workspace.
+    ipc::focus_workspace(start_index).with_context(|| format!("focusing first workspace"))?;
 
     Ok(())
 }

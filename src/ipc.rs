@@ -283,6 +283,7 @@ impl EventStream {
             if let Event::WindowOpenedOrChanged { window } = event
                 && !known_ids.contains(&window.id)
                 && window.workspace_id == Some(workspace_id)
+                && !window.is_floating
             {
                 return Ok(window.id);
             }
